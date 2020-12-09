@@ -239,6 +239,7 @@ bool CLogSerializer::readLogRequest(CLogRequestInFile* logRequestInFile, StringB
     //Open the file if exists.
     StringBuffer fileName(logRequestInFile->getFileName());
     Owned<IFile> file = createIFile(fileName);
+    file->setShareMode(IFSHfull);
     Owned<IFileIO> fileIO = file->open(IFOread);
     if (!fileIO)
     {
