@@ -1073,7 +1073,10 @@ void EsdlServiceImpl::handleServiceRequest(IEspContext &context,
                 getSoapBody(out, origResp);
             else
             {
-                m_pEsdlTransformer->process(context, EsdlResponseMode, srvdef.queryName(), mthdef.queryName(), out, origResp.str(), txResultFlags, ns, schema_location);
+                Owned<IXmlWriterExt> respWriter = createIXmlWriterExt(0, 0, NULL, (flags & ESDL_BINDING_RESPONSE_JSON) ? WTJSONRootless : WTStandard);
+                OwnedPTree resp = createPTreeFromXMLString(origResp.str(), false);
+                m_pEsdlTransformer->process(context, EsdlResponseMode, srvdef.queryName(), mthdef.queryName(), *resp.get(), respWriter.get(), xflags, NULL);
+                out.append(respWriter->str());
                 runPostEsdlScript(context, scriptContext, srvdef, mthdef, out, txResultFlags, ns, schema_location);
             }
         }
