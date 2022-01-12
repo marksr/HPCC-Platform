@@ -1637,7 +1637,7 @@ int Esdl2Transformer::process(IEspContext &ctx, EsdlProcessMode mode, const char
                     out.set(respWriter->str());
                 else
                 {
-                    bool isProcessingJSON = wt != WTStandard;
+                    bool isProcessingJSON = (wt==WTJSONObject || wt==WTJSONRootless);
                     OwnedPTree req;
 
                     if (isProcessingJSON)
