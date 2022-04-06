@@ -1073,8 +1073,9 @@ void EsdlServiceImpl::handleServiceRequest(IEspContext &context,
                 getSoapBody(out, origResp);
             else
             {
-                m_pEsdlTransformer->process(context, EsdlResponseMode, srvdef.queryName(), mthdef.queryName(), out, origResp.str(), txResultFlags, ns, schema_location);
-                runPostEsdlScript(context, scriptContext, srvdef, mthdef, out, txResultFlags, ns, schema_location);
+                bool isProcessingJSON = (flags & ESDL_BINDING_RESPONSE_JSON);
+                m_pEsdlTransformer->process(context, EsdlResponseMode, srvdef.queryName(), mthdef.queryName(), out, origResp.str(), txResultFlags, ns, isProcessingJSON ? NULL : schema_location, isProcessingJSON ? WTJSONObject : WTStandard);
+                runPostEsdlScript(context, scriptContext, srvdef, mthdef, out, txResultFlags, ns, isProcessingJSON ? NULL : schema_location);
             }
         }
     }
