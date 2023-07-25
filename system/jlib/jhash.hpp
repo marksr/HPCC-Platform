@@ -19,6 +19,8 @@
 
 #ifndef JHASH_HPP
 #define JHASH_HPP
+#include <unordered_map>
+#include <utility>
 
 #include "platform.h"
 #include <stdio.h>
@@ -27,8 +29,81 @@
 #include "jiter.hpp"
 #include "jsuperhash.hpp"
 
+
 #ifndef IHASH_DEFINED       // may be defined already elsewhere
 #define IHASH_DEFINED
+
+inline cycle_t queryOneSecCycles_() 
+{
+  return 1;
+};
+
+inline cycle_t get_cycles_now_()
+{
+  time_t now = 0;
+  time(&now);
+  return now;
+};
+
+template <class KEYTYPE, class VALUETYPE>
+class CTimeLimitedCache
+{
+public:
+    CTimeLimitedCache<KEYTYPE, VALUETYPE>(unsigned timeoutMs=defaultCacheTimeoutMs)
+    {
+        timeoutPeriodCycles = ((cycle_t)timeoutMs) * queryOneSecCycles_() / 1000;
+    }
+    VALUETYPE *query(KEYTYPE key, bool touch=false)
+    {
+        CacheElement *match = getMatch(key, touch);
+        if (!match)
+            return nullptr;
+        return &match->second;
+    }
+    bool get(KEYTYPE key, VALUETYPE &result, bool touch=false)
+    {
+        VALUETYPE *res = query(key, touch);
+        if (!res)
+            return false;
+        result = *res;
+        return true;
+    }
+    VALUETYPE &add(KEYTYPE key, VALUETYPE val)
+    {
+        auto &ref = ht[key];
+        ref = std::make_pair(get_cycles_now_(), val);
+        return ref.second;
+    }
+    void kill()
+    {
+        // NB: std::unordered_map clear() does not free the map memory (or call dtors) until it is out of scope
+        std::unordered_map<KEYTYPE, CacheElement> empty;
+        empty.swap(ht);
+    }
+
+private:
+    static constexpr unsigned defaultCacheTimeoutMs = 30000;
+    typedef std::pair<cycle_t, VALUETYPE> CacheElement;
+    cycle_t timeoutPeriodCycles = 0;
+    std::unordered_map<KEYTYPE, CacheElement> ht;
+
+    CacheElement *getMatch(KEYTYPE key, bool touch)
+    {
+        auto it = ht.find(key);
+        if (it == ht.end())
+            return nullptr;
+        cycle_t nowCycles = get_cycles_now_();
+        if ((nowCycles - it->second.first) > timeoutPeriodCycles) // NB: rollover is okay
+        {
+            ht.erase(it);
+            return nullptr;
+        }
+        if (touch)
+            it->second.first = nowCycles;
+        return &it->second;
+    }
+};
+
 interface IHash
 {
     virtual unsigned hash(const void *data)=0;
