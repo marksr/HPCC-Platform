@@ -369,6 +369,7 @@ public:
 #define MYSQL_CACHE_DEFAULT_TIMEOUT 300000
 #include "jhash.hpp"
 #include "jmisc.hpp"
+#include "jmutex.hpp"
 
 interface ICacheEngine : public IInterface
 {
@@ -377,17 +378,151 @@ interface ICacheEngine : public IInterface
     virtual const char * queryCache(CCacheKey &key) = 0;
 };
 
+class CCachePromise : public CInterface
+{
+protected:
+    Owned<ICacheEngine> m_cacheEngine;
+    CTimeLimitedCache<CCacheKey::key_type, bool> promises;
+
+    Monitor monitor;
+public:
+    IMPLEMENT_IINTERFACE;
+
+    CCachePromise(ICacheEngine * cacheEngine)
+    {
+        setCacheEngine(cacheEngine);
+    }
+
+    virtual void setCacheEngine(ICacheEngine * cacheEngine)
+    {
+        m_cacheEngine.set(cacheEngine);
+    }
+
+    virtual ICacheEngine * getCacheEngine()
+    {
+        return m_cacheEngine;
+    }
+
+    virtual bool putPromise(CCacheKey &key)
+    {
+        synchronized b(monitor);
+
+        bool * p_ret = promises.query(key.getKey());
+
+        if (nullptr == p_ret || false == *p_ret)
+        {
+            promises.add(key.getKey(), true);
+            return true;
+        }
+
+        return false;
+    }
+
+    virtual void waitForPromise(CCacheKey &key)
+    {
+        while (hasPromise(key)) {
+            synchronized b(monitor);
+            monitor.wait();
+        }
+    }
+
+    virtual bool hasPromise(CCacheKey &key)
+    {
+        synchronized b(monitor);
+        bool * p_ret = promises.query(key.getKey());
+
+        return (p_ret) ? *p_ret : false;
+    }
+
+    virtual void releasePromise(CCacheKey &key)
+    {
+        synchronized b(monitor);
+        promises.add(key.getKey(), false);
+        monitor.notifyAll();
+    }
+
+    virtual ~CCachePromise()
+    {
+        synchronized b(monitor);
+        monitor.notifyAll();
+    }
+};
+
+class CCacheEngineFuture : public CInterfaceOf<ICacheEngine>
+{
+protected:
+    Owned<CCachePromise> m_cachePromise;
+    CCacheKey m_key;
+public:
+    CCacheEngineFuture(CCachePromise * cachePromise, const char * key) : m_key(key)
+    {
+        m_cachePromise.set(cachePromise);
+    }
+
+    virtual ~CCacheEngineFuture()
+    {
+        if (m_cachePromise)
+        {
+            //Prevent locking the other threads in case some exception happens
+            m_cachePromise->releasePromise(m_key);
+        }
+    }
+
+    virtual const char * queryCache(CCacheKey &key)
+    {
+        if (m_cachePromise && m_cachePromise->getCacheEngine())
+        {
+            ICacheEngine * cacheEngine = m_cachePromise->getCacheEngine();
+            const char * l_data = cacheEngine->queryCache(key);
+
+            if (!l_data && m_cachePromise && !m_cachePromise->putPromise(key))
+            {
+                m_cachePromise->waitForPromise(key);
+                l_data = cacheEngine->queryCache(key);
+            }
+            return l_data;
+        }
+        return nullptr;
+    }
+
+    virtual bool getCache(CCacheKey &key, StringBuffer &data)
+    {
+        if (m_cachePromise && m_cachePromise->getCacheEngine())
+        {
+            ICacheEngine * cacheEngine = m_cachePromise->getCacheEngine();
+            bool cacheFound = cacheEngine->getCache(key, data);
+
+            if (!cacheFound && !m_cachePromise->putPromise(key))
+            {
+                m_cachePromise->waitForPromise(key);
+                cacheFound = cacheEngine->getCache(key, data);
+            }
+            return cacheFound;
+        }
+        return false;
+    }
+
+    virtual void addCache(CCacheKey &key, StringBuffer &data)
+    {
+        if (m_cachePromise && m_cachePromise->getCacheEngine())
+        {
+            m_cachePromise->getCacheEngine()->addCache(key, data);
+            m_cachePromise->releasePromise(key);
+        }
+    }
+};
+
 class CMemoryCache : public CInterfaceOf<ICacheEngine>
 {
 protected:
     CTimeLimitedCache<CCacheKey::key_type, std::string> cache;
-    CriticalSection memoryCacheCrit;
+    CriticalSection m_CacheCrit;
 public:
     CMemoryCache(unsigned timeoutMs) : cache(timeoutMs) {}
 
     virtual void addCache(CCacheKey &key, StringBuffer &data)
     {
-        CriticalBlock b(memoryCacheCrit);
+        CriticalBlock b(m_CacheCrit);
         cache.add(key.getKey(), data.str());
     };
 
@@ -395,7 +530,7 @@ public:
     {
         std::string t_data;
         
-        CriticalBlock b(memoryCacheCrit);
+        CriticalBlock b(m_CacheCrit);
         if (cache.get(key.getKey(), t_data))
         {
             data.set(t_data.c_str());
@@ -407,7 +542,7 @@ public:
 
     virtual const char* queryCache(CCacheKey &key)
     {
-        CriticalBlock b(memoryCacheCrit);
+        CriticalBlock b(m_CacheCrit);
         std::string * t_data = cache.query(key.getKey());
 
         return (t_data) ? t_data->c_str() : nullptr;
@@ -417,7 +552,6 @@ public:
 class CCacheHandler
 {
 protected:
-    Owned<ICacheEngine> m_cacheEngine;
     StringBuffer defaultCacheType;
     unsigned int defaultCacheTimeout;
     static CCacheHandler* instance;
@@ -479,8 +613,12 @@ public:
     virtual ICacheEngine* getCacheEngine()
     {
         return getCacheEngine(defaultCacheType, defaultCacheTimeout);
-    }    
+    }
 
+    virtual CCachePromise* createCachePromise(ICacheEngine * cacheEngine)
+    {
+        return new CCachePromise(cacheEngine);
+    }
 private:
     virtual ICacheEngine* createCacheEngine(StringBuffer &engineType, unsigned timeoutMs)
     {
@@ -521,6 +659,7 @@ protected:
 
     IArrayOf<CEsdlTransformOperationMySqlBindParmeter> m_parameters;
     Owned<ICacheEngine> m_cacheEngine;
+    Owned<CCachePromise> m_cachePromise;
 public:
     CEsdlTransformOperationMySqlCall(XmlPullParser &xpp, StartTag &stag, const StringBuffer &prefix) : CEsdlTransformOperationBase(xpp, stag, prefix)
     {
@@ -583,6 +722,7 @@ public:
             }
 
             m_cacheEngine.setown(CCacheHandler::get()->getCacheEngine(cacheType, cacheTimeout));
+            m_cachePromise.setown(CCacheHandler::get()->createCachePromise(m_cacheEngine.get()));
         }
 
         int type = 0;
@@ -790,8 +930,9 @@ public:
             StringBuffer raw_cacheKey;
             
             getXpathStringValue(raw_cacheKey, sourceContext, m_cacheKey, nullptr);
+            CCacheEngineFuture cacheEngineFuture(m_cachePromise, raw_cacheKey.str());
 
-            if (!pullCache(raw_cacheKey.str(), targetContext))
+            if (!pullCache(&cacheEngineFuture, raw_cacheKey.str(), targetContext))
             {
                 Owned<IEmbedFunctionContext> fc = createFunctionContext(sourceContext);
                 Owned<IXmlWriter> writer = targetContext->createXmlWriter();
@@ -808,7 +949,7 @@ public:
                 if (!raw_cacheKey.isEmpty())
                 {
                     VStringBuffer cacheFromXpath("/esdl_script_context/%s/%s/*", section.str(), m_name.str());
-                    pushCache(raw_cacheKey.str(), targetContext, cacheFromXpath.str());
+                    pushCache(&cacheEngineFuture, raw_cacheKey.str(), targetContext, cacheFromXpath.str());
                 }
             }
         }
@@ -827,9 +968,9 @@ public:
         return true;
     }
 
-    virtual void pushCache(const char * key, IXpathContext * targetContext, const char * fromXpath)
+    virtual void pushCache(ICacheEngine * cacheEngine, const char * key, IXpathContext * targetContext, const char * fromXpath)
     {
-        if (m_cacheEngine && key && *key)
+        if (cacheEngine && key && *key)
         {
             StringBuffer xmlContent;
 
@@ -838,18 +979,18 @@ public:
             if (m_cacheEmptyResults || !xmlContent.isEmpty())
             {
                 CCacheKey l_key(key);
-                m_cacheEngine->addCache(l_key, xmlContent);
+                cacheEngine->addCache(l_key, xmlContent);
                 ESPLOG(LogMax, "Caching data from tag: %s, name: %s, key: %s\nData: %s", m_tagname.str(), m_name.str(), key, xmlContent.str());
             }
         }
     }
 
-    virtual bool pullCache(const char * key, IXpathContext * targetContext)
+    virtual bool pullCache(ICacheEngine * cacheEngine, const char * key, IXpathContext * targetContext)
     {
-        if (m_cacheEngine && key && *key)
+        if (cacheEngine && key && *key)
         {
             CCacheKey l_key(key);
-            const char * l_data = m_cacheEngine->queryCache(l_key);
+            const char * l_data = cacheEngine->queryCache(l_key);
 
             if (l_data)
             {
