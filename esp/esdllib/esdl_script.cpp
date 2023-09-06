@@ -369,7 +369,7 @@ public:
 #define MYSQL_CACHE_DEFAULT_TIMEOUT 300000
 #include "jhash.hpp"
 #include "jmisc.hpp"
-#include "jmutex.hpp"
+//#include "jmutex.hpp"
 
 interface ICacheEngine : public IInterface
 {
@@ -549,27 +549,27 @@ public:
     };     
 };
 
-class CCacheHandler
+class CCacheFactory
 {
 protected:
     StringBuffer defaultCacheType;
     unsigned int defaultCacheTimeout;
-    static CCacheHandler* instance;
+    static CCacheFactory* instance;
 
-    CCacheHandler() : defaultCacheTimeout(MYSQL_CACHE_DEFAULT_TIMEOUT), defaultCacheType(MYSQL_CACHE_DEFAULT_TYPE)
+    CCacheFactory() : defaultCacheTimeout(MYSQL_CACHE_DEFAULT_TIMEOUT), defaultCacheType(MYSQL_CACHE_DEFAULT_TYPE)
     {
         StringBuffer defaultCacheType(MYSQL_CACHE_DEFAULT_TYPE);
         defaultCacheTimeout = MYSQL_CACHE_DEFAULT_TIMEOUT;
     }
 public:   
-    CCacheHandler(CCacheHandler &other) = delete;
-    void operator=(const CCacheHandler &) = delete;
+    CCacheFactory(CCacheFactory &other) = delete;
+    void operator=(const CCacheFactory &) = delete;
 
-    static CCacheHandler* get()
+    static CCacheFactory* get()
     {
         if (!instance)
         {
-            instance = new CCacheHandler();
+            instance = new CCacheFactory();
         }
 
         return instance;
@@ -585,13 +585,13 @@ public:
         return defaultCacheTimeout;
     }
 
-    virtual ICacheEngine* getCacheEngine(StringBuffer &engineType, unsigned timeoutMs = MYSQL_CACHE_DEFAULT_TIMEOUT)
+    virtual ICacheEngine* createCacheEngine(StringBuffer &engineType, unsigned timeoutMs = MYSQL_CACHE_DEFAULT_TIMEOUT)
     {
-        ICacheEngine *ce = createCacheEngine(engineType, timeoutMs);
+        ICacheEngine *ce = pickCacheEngine(engineType, timeoutMs);
 
         if (!ce)
         {
-            ce = createCacheEngine(defaultCacheType, timeoutMs);
+            ce = createCacheEngine(getDefaultCacheType(), timeoutMs);
             
             if (!ce)
             {
@@ -605,14 +605,14 @@ public:
         return ce;
     }
 
-    virtual ICacheEngine* getCacheEngine(StringBuffer &engineType)
+    virtual ICacheEngine* createCacheEngine(StringBuffer &engineType)
     {
-        return getCacheEngine(engineType, defaultCacheTimeout);
+        return createCacheEngine(engineType, getDefaultCacheTimeout());
     }
 
-    virtual ICacheEngine* getCacheEngine()
+    virtual ICacheEngine* createCacheEngine()
     {
-        return getCacheEngine(defaultCacheType, defaultCacheTimeout);
+        return createCacheEngine(getDefaultCacheType(), getDefaultCacheTimeout());
     }
 
     virtual CCachePromise* createCachePromise(ICacheEngine * cacheEngine)
@@ -620,7 +620,7 @@ public:
         return new CCachePromise(cacheEngine);
     }
 private:
-    virtual ICacheEngine* createCacheEngine(StringBuffer &engineType, unsigned timeoutMs)
+    virtual ICacheEngine* pickCacheEngine(StringBuffer &engineType, unsigned timeoutMs)
     {
         if (strcmp(engineType.str(), "MemoryCache") == 0)
         {
@@ -630,7 +630,7 @@ private:
         return nullptr;
     }
 };
-CCacheHandler* CCacheHandler::instance = nullptr;
+CCacheFactory* CCacheFactory::instance = nullptr;
 
 class CEsdlTransformOperationMySqlCall : public CEsdlTransformOperationBase
 {
@@ -707,8 +707,8 @@ public:
 
         if (m_cacheKey)
         {
-            StringBuffer cacheType( (m_cacheType.isEmpty()) ? CCacheHandler::get()->getDefaultCacheType() : m_cacheType.get() );
-            unsigned int cacheTimeout = CCacheHandler::get()->getDefaultCacheTimeout();
+            StringBuffer cacheType( (m_cacheType.isEmpty()) ? CCacheFactory::get()->getDefaultCacheType() : m_cacheType.get() );
+            unsigned int cacheTimeout = CCacheFactory::get()->getDefaultCacheTimeout();
 
             if (!m_cacheTimeout.isEmpty())
             {
@@ -721,8 +721,8 @@ public:
                 cacheTimeout = atoi(t);
             }
 
-            m_cacheEngine.setown(CCacheHandler::get()->getCacheEngine(cacheType, cacheTimeout));
-            m_cachePromise.setown(CCacheHandler::get()->createCachePromise(m_cacheEngine.get()));
+            m_cacheEngine.setown(CCacheFactory::get()->createCacheEngine(cacheType, cacheTimeout));
+            m_cachePromise.setown(CCacheFactory::get()->createCachePromise(m_cacheEngine.get()));
         }
 
         int type = 0;
