@@ -25,6 +25,8 @@
 #include "rtlformat.hpp"
 #include "jsecrets.hpp"
 #include "esdl_script.hpp"
+#include "jhash.hpp"
+#include "jmisc.hpp"
 
 #include <xpp/XmlPullParser.h>
 using namespace xpp;
@@ -343,11 +345,285 @@ static inline void addExceptionsToXpathContext(IXpathContext *targetContext, IEx
     addExceptionsToXpathContext(targetContext, me);
 }
 
+class CCacheKey
+{
+public:
+    typedef unsigned int key_type;
+
+private:
+    key_type m_key;
+public:
+    CCacheKey() = delete;
+    CCacheKey(const char *content) : m_key(0)
+    {
+        if (content)
+        {
+            m_key = crc32(content, strlen(content), 0);
+        }
+    };
+    virtual key_type& getKey()
+    {
+        return m_key;
+    };
+};
+
+#define MYSQL_CACHE_DEFAULT_TYPE "MemoryCache"
+#define MYSQL_CACHE_DEFAULT_TIMEOUT 300000
+
+interface ICacheEngine : public IInterface
+{
+    virtual void addCache(CCacheKey &key, StringBuffer &data) = 0;
+    virtual bool getCache(CCacheKey &key, StringBuffer &data) = 0;
+    virtual const char * queryCache(CCacheKey &key) = 0;
+};
+
+class CCachePromise : public CInterface
+{
+protected:
+    CTimeLimitedCache<CCacheKey::key_type, bool> promises;
+    Monitor monitor;
+public:
+    IMPLEMENT_IINTERFACE;
+
+    CCachePromise(){}
+
+    virtual bool putPromise(CCacheKey &key)
+    {
+        synchronized b(monitor);
+
+        bool * p_ret = promises.query(key.getKey());
+
+        if (nullptr == p_ret || false == *p_ret)
+        {
+            promises.add(key.getKey(), true);
+            return true;
+        }
+
+        return false;
+    }
+
+    virtual void waitForPromise(CCacheKey &key)
+    {
+        while (hasPromise(key)) {
+            synchronized b(monitor);
+            monitor.wait();
+        }
+    }
+
+    virtual bool hasPromise(CCacheKey &key)
+    {
+        synchronized b(monitor);
+        bool * p_ret = promises.query(key.getKey());
+
+        return (p_ret) ? *p_ret : false;
+    }
+
+    virtual void releasePromise(CCacheKey &key)
+    {
+        synchronized b(monitor);
+        promises.add(key.getKey(), false);
+        monitor.notifyAll();
+    }
+
+    virtual ~CCachePromise()
+    {
+        synchronized b(monitor);
+        monitor.notifyAll();
+    }
+};
+
+class CCacheEngineFuture : public CInterfaceOf<ICacheEngine>
+{
+protected:
+    Owned<CCachePromise> m_cachePromise;
+    Owned<ICacheEngine> m_cacheEngine;
+    CCacheKey m_key;
+public:
+    CCacheEngineFuture(CCachePromise * cachePromise, ICacheEngine * cacheEngine, const char * key) : m_key(key)
+    {
+        m_cachePromise.set(cachePromise);
+        m_cacheEngine.set(cacheEngine);
+    }
+
+    virtual ~CCacheEngineFuture()
+    {
+        if (m_cachePromise)
+        {
+            //Prevent locking the other threads in case some exception happens
+            m_cachePromise->releasePromise(m_key);
+        }
+    }
+
+    virtual const char * queryCache(CCacheKey &key)
+    {
+        if (m_cachePromise && m_cacheEngine)
+        {
+            const char * l_data = m_cacheEngine->queryCache(key);
+
+            if (!l_data && m_cachePromise && !m_cachePromise->putPromise(key))
+            {
+                m_cachePromise->waitForPromise(key);
+                l_data = m_cacheEngine->queryCache(key);
+            }
+            return l_data;
+        }
+        return nullptr;
+    }
+
+    virtual bool getCache(CCacheKey &key, StringBuffer &data)
+    {
+        if (m_cachePromise && m_cacheEngine)
+        {
+            bool cacheFound = m_cacheEngine->getCache(key, data);
+
+            if (!cacheFound && !m_cachePromise->putPromise(key))
+            {
+                m_cachePromise->waitForPromise(key);
+                cacheFound = m_cacheEngine->getCache(key, data);
+            }
+            return cacheFound;
+        }
+        return false;
+    }
+
+    virtual void addCache(CCacheKey &key, StringBuffer &data)
+    {
+        if (m_cachePromise && m_cacheEngine)
+        {
+            m_cacheEngine->addCache(key, data);
+            m_cachePromise->releasePromise(key);
+        }
+    }
+};
+
+class CMemoryCache : public CInterfaceOf<ICacheEngine>
+{
+protected:
+    CTimeLimitedCache<CCacheKey::key_type, std::string> cache;
+    CriticalSection m_CacheCrit;
+public:
+    CMemoryCache(unsigned timeoutMs) : cache(timeoutMs) {}
+
+    virtual void addCache(CCacheKey &key, StringBuffer &data)
+    {
+        CriticalBlock b(m_CacheCrit);
+        cache.add(key.getKey(), data.str());
+    };
+
+    virtual bool getCache(CCacheKey &key, StringBuffer &data)
+    {
+        std::string t_data;
+        
+        CriticalBlock b(m_CacheCrit);
+        if (cache.get(key.getKey(), t_data))
+        {
+            data.set(t_data.c_str());
+            return true;
+        }
+
+        return false;
+    };
+
+    virtual const char* queryCache(CCacheKey &key)
+    {
+        CriticalBlock b(m_CacheCrit);
+        std::string * t_data = cache.query(key.getKey());
+
+        return (t_data) ? t_data->c_str() : nullptr;
+    };     
+};
+
+class CCacheFactory
+{
+protected:
+    StringBuffer m_defaultCacheType;
+    unsigned int m_defaultCacheTimeout;
+    static CCacheFactory* instance;
+
+    CCacheFactory() : m_defaultCacheTimeout(MYSQL_CACHE_DEFAULT_TIMEOUT), m_defaultCacheType(MYSQL_CACHE_DEFAULT_TYPE)
+    {
+    }
+
+public:   
+    CCacheFactory(CCacheFactory &other) = delete;
+    void operator=(const CCacheFactory &) = delete;
+
+    static CCacheFactory* get()
+    {
+        if (!instance)
+        {
+            instance = new CCacheFactory();
+        }
+
+        return instance;
+    }
+
+    virtual StringBuffer& getDefaultCacheType()
+    {
+        return m_defaultCacheType;
+    }
+
+    virtual unsigned int getDefaultCacheTimeout()
+    {
+        return m_defaultCacheTimeout;
+    }
+
+    virtual ICacheEngine* createCacheEngine(StringBuffer &engineType, unsigned timeoutMs = MYSQL_CACHE_DEFAULT_TIMEOUT)
+    {
+        ICacheEngine *ce = pickCacheEngine(engineType, timeoutMs);
+
+        if (!ce)
+        {
+            ce = createCacheEngine(getDefaultCacheType(), timeoutMs);
+            
+            if (!ce)
+            {
+                ESPLOG(LogMax, "Unknow cache engine type [%s]. Creating [%s] instead.", engineType.str(), MYSQL_CACHE_DEFAULT_TYPE);
+                return new CMemoryCache(timeoutMs);
+            }
+            
+            ESPLOG(LogMax, "Unknow cache engine type [%s]. Creating [%s] instead.", engineType.str(), m_defaultCacheType.str());
+        }
+
+        return ce;
+    }
+
+    virtual ICacheEngine* createCacheEngine(StringBuffer &engineType)
+    {
+        return createCacheEngine(engineType, getDefaultCacheTimeout());
+    }
+
+    virtual ICacheEngine* createCacheEngine()
+    {
+        return createCacheEngine(getDefaultCacheType(), getDefaultCacheTimeout());
+    }
+
+    virtual CCachePromise* createCachePromise()
+    {
+        return new CCachePromise();
+    }
+private:
+    virtual ICacheEngine* pickCacheEngine(StringBuffer &engineType, unsigned timeoutMs)
+    {
+        if (strcmp(engineType.str(), "MemoryCache") == 0)
+        {
+            return new CMemoryCache(timeoutMs);
+        } 
+
+        return nullptr;
+    }
+};
+CCacheFactory* CCacheFactory::instance = nullptr;
+
 class CEsdlTransformOperationMySqlCall : public CEsdlTransformOperationBase
 {
 protected:
     StringAttr m_name;
+    StringAttr m_cacheType;
+    StringAttr m_cacheTimeout;
+    bool m_cacheEmptyResults;
 
+    Owned<ICompiledXpath> m_cacheKey;
     Owned<ICompiledXpath> m_vaultName;
     Owned<ICompiledXpath> m_secretName;
     Owned<ICompiledXpath> m_section;
@@ -365,7 +641,8 @@ protected:
     Owned<ICompiledXpath> m_select;
 
     IArrayOf<CEsdlTransformOperationMySqlBindParmeter> m_parameters;
-
+    Owned<ICacheEngine> m_cacheEngine;
+    Owned<CCachePromise> m_cachePromise;
 public:
     CEsdlTransformOperationMySqlCall(XmlPullParser &xpp, StartTag &stag, const StringBuffer &prefix) : CEsdlTransformOperationBase(xpp, stag, prefix)
     {
@@ -383,6 +660,10 @@ public:
         m_secretName.setown(compileOptionalXpath(stag.getValue("secret")));
         m_section.setown(compileOptionalXpath(stag.getValue("section")));
         m_resultsetTag.setown(compileOptionalXpath(stag.getValue("resultset-tag")));
+        m_cacheKey.setown(compileOptionalXpath(stag.getValue("cache-key")));
+        m_cacheTimeout.set(stag.getValue("cache-timeout"));
+        m_cacheType.set(stag.getValue("cache-type"));
+        m_cacheEmptyResults = getStartTagValueBool(stag, "cache-empty-results", false);
 
         m_server.setown(compileOptionalXpath(stag.getValue("server")));
         m_user.setown(compileOptionalXpath(stag.getValue("user")));
@@ -405,6 +686,26 @@ public:
                     m_mysqlOptionXpaths.append(*attXpath.getClear());
                 }
             }
+        }
+
+        if (m_cacheKey)
+        {
+            StringBuffer cacheType( (m_cacheType.isEmpty()) ? CCacheFactory::get()->getDefaultCacheType() : m_cacheType.get() );
+            unsigned int cacheTimeout = CCacheFactory::get()->getDefaultCacheTimeout();
+
+            if (!m_cacheTimeout.isEmpty())
+            {
+                const char *t = m_cacheTimeout.get();
+                
+                for (int i = 0; i < strlen(t); i++)
+                    if (!std::isdigit(t[i])) 
+                        esdlOperationError(ESDL_SCRIPT_Error, m_tagname, "invalid cache-timeout value", m_traceName, !m_ignoreCodingErrors);
+                
+                cacheTimeout = atoi(t);
+            }
+
+            m_cacheEngine.setown(CCacheFactory::get()->createCacheEngine(cacheType, cacheTimeout));
+            m_cachePromise.setown(CCacheFactory::get()->createCachePromise());
         }
 
         int type = 0;
@@ -558,8 +859,8 @@ public:
         fc->writeResult(nullptr, nullptr, nullptr, writer);
         if (!isEmptyString(tag))
             writer->outputEndNested(tag);
-    }
 
+    }
     IXpathContextIterator *select(IXpathContext * xpathContext)
     {
         IXpathContextIterator *xpathset = nullptr;
@@ -609,16 +910,30 @@ public:
 
         try
         {
-            Owned<IEmbedFunctionContext> fc = createFunctionContext(sourceContext);
-            Owned<IXmlWriter> writer = targetContext->createXmlWriter();
-            StringBuffer rstag;
-            getXpathStringValue(rstag, sourceContext, m_resultsetTag, nullptr);
-            if (!selected)
-                processCurrent(fc, writer, rstag, scriptContext, targetContext, sourceContext);
-            else
+            StringBuffer raw_cacheKey;
+            
+            getXpathStringValue(raw_cacheKey, sourceContext, m_cacheKey, nullptr);
+            CCacheEngineFuture cacheEngineFuture(m_cachePromise, m_cacheEngine, raw_cacheKey.str());
+
+            if (!pullCache(&cacheEngineFuture, raw_cacheKey.str(), targetContext))
             {
-                ForEach(*selected)
-                    processCurrent(fc, writer, rstag, scriptContext, targetContext, &selected->query());
+                Owned<IEmbedFunctionContext> fc = createFunctionContext(sourceContext);
+                Owned<IXmlWriter> writer = targetContext->createXmlWriter();
+                StringBuffer rstag;
+                getXpathStringValue(rstag, sourceContext, m_resultsetTag, nullptr);
+                if (!selected)
+                    processCurrent(fc, writer, rstag, scriptContext, targetContext, sourceContext);
+                else
+                {
+                    ForEach(*selected)
+                        processCurrent(fc, writer, rstag, scriptContext, targetContext, &selected->query());
+                }
+
+                if (!raw_cacheKey.isEmpty())
+                {
+                    VStringBuffer cacheFromXpath("/esdl_script_context/%s/%s/*", section.str(), m_name.str());
+                    pushCache(&cacheEngineFuture, raw_cacheKey.str(), targetContext, cacheFromXpath.str());
+                }
             }
         }
         catch(IMultiException *me)
@@ -634,6 +949,41 @@ public:
 
         sourceContext->addXpathVariable(m_name, xpath);
         return true;
+    }
+
+    virtual void pushCache(ICacheEngine * cacheEngine, const char * key, IXpathContext * targetContext, const char * fromXpath)
+    {
+        if (cacheEngine && key && *key)
+        {
+            StringBuffer xmlContent;
+
+            targetContext->toXml(fromXpath, xmlContent);
+
+            if (m_cacheEmptyResults || !xmlContent.isEmpty())
+            {
+                CCacheKey l_key(key);
+                cacheEngine->addCache(l_key, xmlContent);
+                ESPLOG(LogMax, "Caching data from tag: %s, name: %s, key: %s\nData: %s", m_tagname.str(), m_name.str(), key, xmlContent.str());
+            }
+        }
+    }
+
+    virtual bool pullCache(ICacheEngine * cacheEngine, const char * key, IXpathContext * targetContext)
+    {
+        if (cacheEngine && key && *key)
+        {
+            CCacheKey l_key(key);
+            const char * l_data = cacheEngine->queryCache(l_key);
+
+            if (l_data)
+            {
+                ESPLOG(LogMax, "Retrieving cache data from tag: %s, name: %s, key: %s\nData: %s", m_tagname.str(), m_name.str(), key, l_data);
+                if (*l_data)
+                    targetContext->addXmlContent(l_data);
+                return true;
+            }
+        }
+        return false;
     }
 
     virtual void toDBGLog() override
@@ -712,9 +1062,16 @@ class CEsdlTransformOperationHttpPostXml : public CEsdlTransformOperationBase
 protected:
     StringAttr m_name;
     StringAttr m_section;
+    StringAttr m_cacheType;
+    StringAttr m_cacheTimeout;
+    bool m_cacheEmptyResults;
+
+    Owned<ICompiledXpath> m_cacheKey;
     Owned<ICompiledXpath> m_url;
     IArrayOf<IEsdlTransformOperationHttpHeader> m_headers;
     Owned<IEsdlTransformOperation> m_content;
+    Owned<ICacheEngine> m_cacheEngine;
+    Owned<CCachePromise> m_cachePromise;
 
 public:
     CEsdlTransformOperationHttpPostXml(XmlPullParser &xpp, StartTag &stag, const StringBuffer &prefix) : CEsdlTransformOperationBase(xpp, stag, prefix)
@@ -725,12 +1082,37 @@ public:
         m_section.set(stag.getValue("section"));
         if (m_section.isEmpty())
             m_section.set("temporaries");
+        m_cacheKey.setown(compileOptionalXpath(stag.getValue("cache-key")));
+        m_cacheTimeout.set(stag.getValue("cache-timeout"));
+        m_cacheType.set(stag.getValue("cache-type"));
+        m_cacheEmptyResults = getStartTagValueBool(stag, "cache-empty-results", false);
+
         if (m_name.isEmpty())
             esdlOperationError(ESDL_SCRIPT_MissingOperationAttr, m_tagname, "without name", m_traceName, !m_ignoreCodingErrors);
         const char *url = stag.getValue("url");
         if (isEmptyString(url))
             esdlOperationError(ESDL_SCRIPT_MissingOperationAttr, m_tagname, "without url", m_traceName, !m_ignoreCodingErrors);
         m_url.setown(compileXpath(url));
+
+        if (m_cacheKey)
+        {
+            StringBuffer cacheType( (m_cacheType.isEmpty()) ? CCacheFactory::get()->getDefaultCacheType() : m_cacheType.get() );
+            unsigned int cacheTimeout = CCacheFactory::get()->getDefaultCacheTimeout();
+
+            if (!m_cacheTimeout.isEmpty())
+            {
+                const char *t = m_cacheTimeout.get();
+
+                for (int i = 0; i < strlen(t); i++)
+                    if (!std::isdigit(t[i]))
+                        esdlOperationError(ESDL_SCRIPT_Error, m_tagname, "invalid cache-timeout value", m_traceName, !m_ignoreCodingErrors);
+
+                cacheTimeout = atoi(t);
+            }
+
+            m_cacheEngine.setown(CCacheFactory::get()->createCacheEngine(cacheType, cacheTimeout));
+            m_cachePromise.setown(CCacheFactory::get()->createCachePromise());
+        }
 
         int type = 0;
         while((type = xpp.next()) != XmlPullParser::END_DOCUMENT)
@@ -873,11 +1255,62 @@ public:
         if (m_url)
             sourceContext->evaluateAsString(m_url, url);
 
-        Owned<IProperties> headers = createProperties();
-        buildRequest(scriptContext, targetContext, sourceContext, url, headers);
-        postRequest(scriptContext, targetContext, sourceContext, url, headers);
+        StringBuffer raw_cacheKey;
+
+        if (m_cacheKey)
+            sourceContext->evaluateAsString(m_cacheKey, raw_cacheKey);
+
+        CCacheEngineFuture cacheEngineFuture(m_cachePromise, m_cacheEngine, raw_cacheKey.str());
+
+        if (!pullCache(&cacheEngineFuture, raw_cacheKey.str(), targetContext))
+        {
+            Owned<IProperties> headers = createProperties();
+            buildRequest(scriptContext, targetContext, sourceContext, url, headers);
+            postRequest(scriptContext, targetContext, sourceContext, url, headers);
+
+            if (!raw_cacheKey.isEmpty())
+            {
+                VStringBuffer cacheFromXpath("/esdl_script_context/%s/%s/*", m_section.str(), m_name.str());
+                pushCache(&cacheEngineFuture, raw_cacheKey.str(), targetContext, cacheFromXpath.str());
+            }
+        }
 
         sourceContext->addXpathVariable(m_name, xpath);
+        return false;
+    }
+
+    virtual void pushCache(ICacheEngine * cacheEngine, const char * key, IXpathContext * targetContext, const char * fromXpath)
+    {
+        if (cacheEngine && key && *key)
+        {
+            StringBuffer xmlContent;
+
+            targetContext->toXml(fromXpath, xmlContent);
+
+            if (m_cacheEmptyResults || !xmlContent.isEmpty())
+            {
+                CCacheKey l_key(key);
+                cacheEngine->addCache(l_key, xmlContent);
+                ESPLOG(LogMax, "Caching data from tag: %s, name: %s, key: %s\nData: %s", m_tagname.str(), m_name.str(), key, xmlContent.str());
+            }
+        }
+    }
+
+    virtual bool pullCache(ICacheEngine * cacheEngine, const char * key, IXpathContext * targetContext)
+    {
+        if (cacheEngine && key && *key)
+        {
+            CCacheKey l_key(key);
+            const char * l_data = cacheEngine->queryCache(l_key);
+
+            if (l_data)
+            {
+                ESPLOG(LogMax, "Retrieving cache data from tag: %s, name: %s, key: %s\nData: %s", m_tagname.str(), m_name.str(), key, l_data);
+                if (*l_data)
+                    targetContext->addXmlContent(l_data);
+                return true;
+            }
+        }
         return false;
     }
 
