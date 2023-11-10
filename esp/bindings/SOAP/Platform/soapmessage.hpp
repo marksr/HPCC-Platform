@@ -121,7 +121,7 @@ protected:
     void AppendDetails(int code, const char* message, const char* actor="", const char* detailNS=NULL, const char* details = NULL)
     {
         StringBuffer encFaultStr;
-        encodeXML(message, encFaultStr);
+        encodeXML(message, encFaultStr, ENCODE_NONE, strlen(message), true);
 
         SoapStr.append(SOAPEnvelopeStart);
         SoapStr.append("<soap:Body><soap:Fault>");
