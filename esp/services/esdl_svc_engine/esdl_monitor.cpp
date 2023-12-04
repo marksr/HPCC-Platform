@@ -241,7 +241,7 @@ public:
             protocol.set("http");
         StringBuffer envptxml;
         toXML(envpt, envptxml);
-        DBGLOG("Using the following config tree to create the binding and service:\n%s\n", envptxml.str());
+        // DBGLOG("Using the following config tree to create the binding and service:\n%s\n", envptxml.str());
         IEspServer* server = queryEspServer();
         IEspProtocol* espProtocol = server->queryProtocol(protocol.str());
         Owned<EsdlBindingImpl> esdlbinding = new CEsdlSvcEngineSoapBindingEx(envpt, tree, static_binding, process);
