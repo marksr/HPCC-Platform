@@ -96,7 +96,7 @@
     "url-loader": "^3.0.0",
     "webpack": "^4.45.0",
     "webpack-cli": "^4.5.0",
-    "webpack-dev-server": "^3.11.2"
+    "webpack-dev-server": "^5.0.2"
   },
   "author": "HPCC Systems",
   "license": "Apache-2.0",
