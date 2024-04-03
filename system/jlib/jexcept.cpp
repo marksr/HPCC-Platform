@@ -423,7 +423,7 @@ public:
             
             StringBuffer msg;
             StringBuffer encoded;
-            encodeXML(exception.errorMessage(msg).str(), encoded);
+            encodeXML(exception.errorMessage(msg).str(), encoded, ENCODE_NONE, strlen(exception.errorMessage(msg)), true);
             buffer.appendf("<Message>%s</Message>", encoded.str());
             
             if (indent) buffer.append("\n\t");
