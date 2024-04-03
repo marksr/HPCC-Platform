@@ -113,7 +113,7 @@ void xppToXmlString(XmlPullParser &xpp, StartTag &stag, StringBuffer & buffer)
             break;
             case XmlPullParser::CONTENT:
                 content = xpp.readContent();
-                encodeXML(content, buffer);
+                encodeXML(content, buffer, ENCODE_NONE, strlen(content), true);
                 break;
             case XmlPullParser::END_DOCUMENT:
                 level=0;
