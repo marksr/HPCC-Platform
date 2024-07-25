@@ -93,8 +93,9 @@ protected:
     void verifyESPUserNameCookie(EspAuthRequest& authReq, CESPCookieVerification& cookie);
     void verifyESPAuthenticatedCookie(EspAuthRequest& authReq, CESPCookieVerification& cookie);
     void sendVerifyCookieResponse(EspAuthRequest& authReq, CIArrayOf<CESPCookieVerification>& cookies);
+    ESPAuthHeaderType checkUserAuthType(StringBuffer& authorizationHeader);
 
-    EspAuthState checkUserAuthPerRequest(EspAuthRequest& authReq);
+    EspAuthState checkUserAuthPerRequest(EspAuthRequest& authReq, StringBuffer& authorizationHeader);
     EspAuthState checkUserAuthPerSession(EspAuthRequest& authReq, StringBuffer& authorizationHeader);
     EspAuthState authNewSession(EspAuthRequest& authReq, const char* _userName, const char* _password, const char* sessionStartURL, bool unlock);
     EspAuthState authExistingSession(EspAuthRequest& req, unsigned sessionID);

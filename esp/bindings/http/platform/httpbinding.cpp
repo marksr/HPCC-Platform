@@ -176,7 +176,7 @@ EspHttpBinding::EspHttpBinding(IPropertyTree* tree, const char *bindname, const 
         }
         if (strnicmp(m_wsdlAddress.str(), "http", 4))
             m_wsdlAddress.insert(0, (m_port!=443) ? "http://" : "https://");
-        
+
         Owned<IPropertyTree> authcfg = bnd_cfg->getPropTree("Authenticate");
         if(authcfg != NULL)
         {
@@ -682,19 +682,40 @@ void EspHttpBinding::populateRequest(CHttpRequest *request)
     return ;
 }
 
-bool EspHttpBinding::doAuth(IEspContext* ctx)
+bool EspHttpBinding::doAuth(IEspContext* ctx, ESPAuthHeaderType authHeaderType)
 {
-    if(m_authtype.length() == 0 || stricmp(m_authtype.str(), "Basic") == 0)
+    if (stricmp(m_authtype.str(), "Basic") == 0)
     {
-        CumulativeTimer* timer = ctx->queryTraceSummaryCumulativeTimer(LogNormal, "custom_fields.basicAuthTime", TXSUMMARY_GRP_ENTERPRISE);
-        CumulativeTimer::Scope authScope(timer);
-
-        ctx->addTraceSummaryTimeStamp(LogMin, "custom_fields.authStart", TXSUMMARY_GRP_ENTERPRISE);
-        bool result = basicAuth(ctx);
-        ctx->addTraceSummaryTimeStamp(LogMin, "custom_fields.authEnd", TXSUMMARY_GRP_ENTERPRISE);
-        return result;
+        // Forces to perform using Basic Auth
+        authHeaderType = ESPAuthBasic;
     }
 
+    switch (authHeaderType)
+    {
+    case ESPAuthUnknown:
+        return false;
+    case ESPAuthBearer:
+        {
+            CumulativeTimer* timer = ctx->queryTraceSummaryCumulativeTimer(LogNormal, "custom_fields.bearerAuthTime", TXSUMMARY_GRP_ENTERPRISE);
+            CumulativeTimer::Scope authScope(timer);
+
+            ctx->addTraceSummaryTimeStamp(LogMin, "custom_fields.authStart", TXSUMMARY_GRP_ENTERPRISE);
+            bool result = bearerAuth(ctx);
+            ctx->addTraceSummaryTimeStamp(LogMin, "custom_fields.authEnd", TXSUMMARY_GRP_ENTERPRISE);
+            return result;
+        }
+    case ESPAuthBasic:
+    default:
+        {
+            CumulativeTimer* timer = ctx->queryTraceSummaryCumulativeTimer(LogNormal, "custom_fields.basicAuthTime", TXSUMMARY_GRP_ENTERPRISE);
+            CumulativeTimer::Scope authScope(timer);
+
+            ctx->addTraceSummaryTimeStamp(LogMin, "custom_fields.authStart", TXSUMMARY_GRP_ENTERPRISE);
+            bool result = basicAuth(ctx);
+            ctx->addTraceSummaryTimeStamp(LogMin, "custom_fields.authEnd", TXSUMMARY_GRP_ENTERPRISE);
+            return result;
+        }
+    }
     return false;
 }
 
@@ -817,6 +838,107 @@ bool EspHttpBinding::basicAuth(IEspContext* ctx)
     m_secmgr->updateSettings(*user,securitySettings, ctx->querySecureContext());
 
     ctx->addTraceSummaryTimeStamp(LogMin, "basicAuth", TXSUMMARY_GRP_CORE);
+    return authorized;
+}
+
+bool EspHttpBinding::bearerAuth(IEspContext* ctx)
+{
+    StringBuffer userid;
+    ctx->getUserID(userid);
+    if(userid.length() == 0)
+    {
+        ctx->setAuthError(EspAuthErrorEmptyUserID);
+        ctx->AuditMessage(AUDIT_TYPE_ACCESS_FAILURE, "Authentication", "Access Denied: No username provided");
+        return false;
+    }
+
+    if(stricmp(m_authmethod.str(), "UserDefined") == 0)
+        return true;
+
+    ISecUser *user = ctx->queryUser();
+    if(user == NULL)
+    {
+        UWARNLOG("Can't find user in context");
+        ctx->setAuthError(EspAuthErrorUserNotFoundInContext);
+        ctx->AuditMessage(AUDIT_TYPE_ACCESS_FAILURE, "Authentication", "Access Denied: No username provided");
+        return false;
+    }
+
+    if(m_secmgr.get() == NULL)
+    {
+        UWARNLOG("No mechanism established for authentication");
+        ctx->setAuthError(EspAuthErrorNoAuthMechanism);
+        return false;
+    }
+
+    ISecResourceList* rlist = ctx->queryResources();
+    if(rlist == NULL)
+    {
+        UWARNLOG("No Security Resource");
+        ctx->setAuthError(EspAuthErrorEmptySecResource);
+        return false;
+    }
+
+    bool authenticated = m_secmgr->authorize(*user, rlist, ctx->querySecureContext());
+    if(!authenticated)
+    {
+        VStringBuffer err("User %s : ", user->getName());
+        switch (user->getAuthenticateStatus())
+        {
+        case AS_PASSWORD_EXPIRED :
+        case AS_PASSWORD_VALID_BUT_EXPIRED :
+            err.append("Token expired");
+            break;
+        case AS_ACCOUNT_DISABLED :
+            err.append("Account disabled");
+            break;
+        case AS_ACCOUNT_EXPIRED :
+            err.append("Account expired");
+            break;
+        case AS_ACCOUNT_LOCKED :
+            err.append("Account locked");
+            break;
+        case AS_INVALID_CREDENTIALS :
+        default:
+            err.append("Access Denied: Invalid credential");
+        }
+        ctx->AuditMessage(AUDIT_TYPE_ACCESS_FAILURE, "Authentication", err.str());
+        ctx->setAuthError(EspAuthErrorNotAuthenticated);
+        ctx->setRespMsg(err.str());
+        return false;
+    }
+    bool authorized = true;
+    for(int i = 0; i < rlist->count(); i++)
+    {
+        ISecResource* curres = rlist->queryResource(i);
+        if(curres != NULL)
+        {
+            int access = (int)curres->getAccessFlags();
+            int required = (int)curres->getRequiredAccessFlags();
+            if(access < required)
+            {
+                const char *desc=curres->getDescription();
+                VStringBuffer msg("Access for user '%s' denied to: %s. Access=%d, Required=%d", user->getName(), desc?desc:"<no-desc>", access, required);
+                ESPLOG(LogMin, "%s", msg.str());
+                ctx->AuditMessage(AUDIT_TYPE_ACCESS_FAILURE, "Authorization", "Access Denied: Not Authorized", "Resource: %s [%s]", curres->getName(), (desc) ? desc : "");
+                ctx->setAuthError(EspAuthErrorNotAuthorized);
+                ctx->setRespMsg(msg.str());
+                authorized = false;
+                break;
+            }
+        }
+    }
+
+    if(authorized==false)
+        return false;
+
+    ISecPropertyList* securitySettings = ctx->querySecuritySettings();
+    if(securitySettings == NULL)
+        return authorized;
+
+    m_secmgr->updateSettings(*user,securitySettings, ctx->querySecureContext());
+
+    ctx->addTraceSummaryTimeStamp(LogMin, "bearerAuth", TXSUMMARY_GRP_CORE);
     return authorized;
 }
 

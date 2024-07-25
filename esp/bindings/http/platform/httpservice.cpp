@@ -1000,7 +1000,7 @@ EspAuthState CEspHttpServer::checkUserAuth()
     }
     if (domainAuthType != AuthPerSessionOnly)
     {// BasicAuthentication or SOAP calls
-        EspAuthState authState = checkUserAuthPerRequest(authReq);
+        EspAuthState authState = checkUserAuthPerRequest(authReq, authorizationHeader);
         if (authState != authUnknown)
             return authState;
     }
@@ -1510,12 +1510,24 @@ EspAuthState CEspHttpServer::checkUserAuthPerSession(EspAuthRequest& authReq, St
     return authFailed;
 }
 
-EspAuthState CEspHttpServer::checkUserAuthPerRequest(EspAuthRequest& authReq)
+ESPAuthHeaderType CEspHttpServer::checkUserAuthType(StringBuffer& authorizationHeader)
+{
+    if (strncmp(authorizationHeader.str(), "Basic ", 6) == 0)
+        return ESPAuthBasic;
+    else if (strncmp(authorizationHeader.str(), "Bearer ", 7) == 0)
+        return ESPAuthBearer;
+
+    return ESPAuthUnknown;
+}
+
+EspAuthState CEspHttpServer::checkUserAuthPerRequest(EspAuthRequest& authReq, StringBuffer& authorizationHeader)
 {
     ESPLOG(LogMax, "checkUserAuthPerRequest");
 
     authReq.authBinding->populateRequest(m_request.get());
-    if (authReq.authBinding->doAuth(authReq.ctx))
+
+    ESPAuthHeaderType espAuthHeaderType = checkUserAuthType(authorizationHeader);
+    if (authReq.authBinding->doAuth(authReq.ctx, espAuthHeaderType))
     {//We do pass the authentication per the request
         // authenticate optional groups. Do we still need?
         authOptionalGroups(authReq);

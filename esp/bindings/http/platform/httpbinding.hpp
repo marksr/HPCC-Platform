@@ -25,6 +25,13 @@
 #include "bindutil.hpp"
 #include "seclib.hpp"
 
+typedef enum espAuthHeaderType_
+{
+    ESPAuthBasic,
+    ESPAuthBearer,
+    ESPAuthUnknown
+} ESPAuthHeaderType;
+
 class CMethodInfo : public CInterface
 {
 public:
@@ -204,7 +211,7 @@ public:
 
     virtual bool rootAuthRequired();
     virtual bool authRequired(CHttpRequest *request);
-    virtual bool doAuth(IEspContext* ctx);
+    virtual bool doAuth(IEspContext* ctx, ESPAuthHeaderType authHeaderType = ESPAuthBasic);
     virtual void populateRequest(CHttpRequest *request);
     virtual void getNavSettings(int &width, bool &resizable, bool &scroll){width=165;resizable=false;scroll=true;}
     virtual const char* getRootPage(IEspContext* ctx) {return NULL;}
@@ -407,6 +414,7 @@ public:
 
 protected:
     virtual bool basicAuth(IEspContext* ctx);
+    virtual bool bearerAuth(IEspContext* ctx);
     int getWsdlOrXsd(IEspContext &context, CHttpRequest* request, CHttpResponse* response, const char *service, const char *method, bool isWsdl);
     virtual bool getSchema(StringBuffer& schema, IEspContext &ctx, CHttpRequest* req, const char *service, const char *method,bool standalone);
     virtual void appendSchemaNamespaces(IPropertyTree *namespaces, IEspContext &ctx, CHttpRequest* req, const char *service, const char *method){}

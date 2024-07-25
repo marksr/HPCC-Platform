@@ -24,7 +24,7 @@ option(BUILD_TESTS "Configure CMake to build tests (or not)" ON) # Copy from jwt
 set(BUILD_TESTS OFF)
 option(BUILD_EXAMPLES "Configure CMake to build examples (or not)" ON) # Copy from jwt-cpp/CMakeLists.txt
 set(BUILD_EXAMPLES OFF)
-add_subdirectory(jwt-cpp EXCLUDE_FROM_ALL)
+# add_subdirectory(jwt-cpp EXCLUDE_FROM_ALL)
 
 # Required installed libraries
 find_package(CURL REQUIRED)
@@ -35,11 +35,11 @@ set(SRCS
     "${CMAKE_CURRENT_SOURCE_DIR}/jwtEndpoint.cpp"
     "${HPCC_SOURCE_DIR}/system/security/shared/authmap.cpp"
     "${HPCC_SOURCE_DIR}/esp/services/ws_store/espstorelib/daliKVStore.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/jwt-cpp/include/jwt-cpp/jwt.h")
+    "${HPCC_SOURCE_DIR}/system/jwt_sm/jwt-cpp/include/jwt-cpp/jwt.h")
 
 add_definitions(-DJWTSECURITY_EXPORTS -D_USRDLL)
 
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/jwt-cpp/include"
+include_directories("${HPCC_SOURCE_DIR}/system/jwt_sm/jwt-cpp/include"
                     "${HPCC_SOURCE_DIR}/dali/base"
                     "${HPCC_SOURCE_DIR}/dali/server"
                     "${HPCC_SOURCE_DIR}/esp/services/ws_store/espstorelib"

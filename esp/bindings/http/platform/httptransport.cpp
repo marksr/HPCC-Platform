@@ -1642,14 +1642,15 @@ void CHttpRequest::getEspPathInfo(sub_service &sstype, StringBuffer *pathEx, Str
     }
 }
     
-void CHttpRequest::getBasicRealm(StringBuffer& realm)
+void CHttpRequest::getRequestRealm(StringBuffer& realm)
 {
     StringBuffer authheader;
     getHeader("WWW-Authenticate", authheader);
     if(authheader.length() == 0)
         return;
     
-    if(Utils::strncasecmp(authheader.str(), "Basic ", strlen("Basic ")) != 0)
+    if(Utils::strncasecmp(authheader.str(), "Basic ", strlen("Basic ")) != 0 &&
+    Utils::strncasecmp(authheader.str(), "Bearer ", strlen("Bearer ")) != 0)
         return;
 
     const char* strt = strchr(authheader.str(), '\"');
@@ -1694,17 +1695,61 @@ StringBuffer& CHttpRequest::getPeer(StringBuffer& Peer)
     return Peer;
 }
 
-void CHttpRequest::getBasicAuthorization(StringBuffer& userid, StringBuffer& password,StringBuffer& realm)
+void CHttpRequest::getRequestAuthorization(StringBuffer& userid, StringBuffer& password,StringBuffer& realm)
 {
     StringBuffer authheader;
     getHeader("Authorization", authheader);
     if(authheader.length() == 0)
         return;
-    if(Utils::strncasecmp(authheader.str(), "Basic ", strlen("Basic ")) != 0)
-        return;
 
     StringBuffer uidpair;
-    JBASE64_Decode(authheader.str() + strlen("Basic "), uidpair);
+
+    if(Utils::strncasecmp(authheader.str(), "Basic ", strlen("Basic ")) == 0)
+    {
+        JBASE64_Decode(authheader.str() + strlen("Basic "), uidpair);
+    }
+    else if (Utils::strncasecmp(authheader.str(), "Bearer ", strlen("Bearer ")) == 0)
+    {
+        const char* token = authheader.str() + strlen("Bearer ");
+
+        // Extract payload from token
+        const char* payloadStart = strchr(token, '.');
+
+        if (payloadStart != nullptr)
+        {
+            payloadStart++;
+            const char* payloadEnd = strchr(payloadStart, '.');
+
+            if (payloadEnd != nullptr)
+            {
+                Owned<IPropertyTree> jsonTree;
+                StringBuffer payload, decodedPayload;
+                size_t payloadLength = payloadEnd - payloadStart;
+                payload.append(payloadLength, payloadStart);
+
+                try {
+                    JBASE64_Decode(payload.str(), decodedPayload);
+                    jsonTree.setown(createPTreeFromJSONString(decodedPayload.str()));
+                } catch (...) {
+                    return;
+                }
+
+                // Extract userid from "sub" field
+                const char* subValue = jsonTree->queryProp("sub");
+
+                if (subValue != nullptr)
+                    uidpair.set(subValue).append(":").append(token);
+                else
+                    uidpair.set(":").append(token);
+            }
+            else
+                return;
+        }
+        else
+            return;
+    }
+    else
+        return;
 
     //uidpair formatted as   [domain\]username:password    (domain optional)
     
@@ -1726,9 +1771,9 @@ void CHttpRequest::getBasicAuthorization(StringBuffer& userid, StringBuffer& pas
     else
     {
         pairstr = uidpair.str();
-        getBasicRealm(realm);
+        getRequestRealm(realm);
     }
-    
+
     const char* colon = strchr(pairstr, ':');
     if(colon == NULL)
     {
@@ -1830,7 +1875,7 @@ void CHttpRequest::updateContext()
 
 
         StringBuffer userid, password, realm;
-        getBasicAuthorization(userid, password, realm);
+        getRequestAuthorization(userid, password, realm);
         if(userid.length() > 0)
         {
             m_context->setUserID(userid.str());

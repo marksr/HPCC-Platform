@@ -358,8 +358,8 @@ public:
     virtual void parseEspPathInfo();
     virtual void getEspPathInfo(sub_service &sstype, StringBuffer *pathEx=NULL, StringBuffer *service=NULL, StringBuffer *method=NULL, bool makeupper=true);
     
-    virtual void getBasicAuthorization(StringBuffer& userid, StringBuffer& password,StringBuffer& Realm);
-    virtual void getBasicRealm(StringBuffer& realm);
+    virtual void getRequestAuthorization(StringBuffer& userid, StringBuffer& password,StringBuffer& Realm);
+    virtual void getRequestRealm(StringBuffer& realm);
     virtual int getPeerPort();
     virtual StringBuffer& getPeer(StringBuffer& peer);
 
